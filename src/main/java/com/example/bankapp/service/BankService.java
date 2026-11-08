@@ -1,6 +1,7 @@
 package com.example.bankapp.service;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.util.List;
 
 import org.springframework.stereotype.Service;
@@ -103,7 +104,8 @@ public class BankService {
         return customerRepository.save(customer);
     }
 
-    // Money transfer
+    
+    // Money transfer with 1% bank fee
     @Transactional(rollbackFor = Exception.class)
     public BankTransaction transfer(TransferRequest request)
             throws Exception {
@@ -113,36 +115,66 @@ public class BankService {
 
         BigDecimal amount = request.getAmount();
 
-        // Validate accounts
+        // Bank fee account
+        String bankAccount = "999999";
+
+        // Validate amount
+        validateAmount(amount);
+
+        // Validate sender and receiver
         if (from.equals(to)) {
             throw new BankException(
                     "Sender and receiver must be different accounts");
         }
 
-        // Get sender and receiver
+        // Bank account cannot be used as sender or receiver
+        if (from.equals(bankAccount) || to.equals(bankAccount)) {
+            throw new BankException(
+                    "Bank fee account cannot be used for transfers");
+        }
+
+        // Calculate 1% transfer fee
+        BigDecimal fee = amount
+                .multiply(new BigDecimal("0.01"))
+                .setScale(2, RoundingMode.HALF_UP);
+
+        // Total amount deducted from sender
+        BigDecimal totalDebit = amount.add(fee);
+
+        // Check all accounts exist
         getCustomer(from);
         getCustomer(to);
+        getCustomer(bankAccount);
 
-        // Debit sender only by transfer amount
-        int debitResult = customerRepository.debit(from, amount);
+        // UPDATE 1: Debit sender (amount + fee)
+        int debitResult =
+                customerRepository.debit(from, totalDebit);
 
         if (debitResult == 0) {
-            throw new InsufficientBalanceException(
-                    "Insufficient balance");
+            throw new InsufficientBalanceException(from);
         }
 
-        // Simulate failure for rollback testing
+        // UPDATE 2: Credit receiver (transfer amount)
+        int receiverResult =
+                customerRepository.credit(to, amount);
+
+        if (receiverResult == 0) {
+            throw new AccountNotFoundException(to);
+        }
+
+        // UPDATE 3: Credit bank account (1% fee)
+        int bankResult =
+                customerRepository.credit(bankAccount, fee);
+
+        if (bankResult == 0) {
+            throw new AccountNotFoundException(bankAccount);
+        }
+
+        // Simulate failure AFTER all three updates
+        // All three updates must rollback
         if (request.isSimulateFailure()) {
             throw new RuntimeException(
-                    "All changes were rolled back (simulated failure)");
-        }
-
-        // Credit receiver with full transfer amount
-        int creditResult = customerRepository.credit(to, amount);
-
-        if (creditResult == 0) {
-            throw new AccountNotFoundException(
-                    "Receiver account not found");
+                    "Simulated failure: all three updates rolled back");
         }
 
         // Save successful transaction
@@ -153,7 +185,8 @@ public class BankService {
         transaction.setAmount(amount);
         transaction.setStatus(TransactionStatus.SUCCESS);
         transaction.setDescription(
-                "TRANSFER - Money transferred successfully");
+                "TRANSFER - Successful transfer. "
+                + "Bank fee (1%): LKR " + fee);
 
         return transactionRepository.save(transaction);
     }
